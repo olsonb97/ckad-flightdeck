@@ -1,0 +1,93 @@
+name: ckad-flightdeck
+services:
+  cluster:
+    image: ${K3S_IMAGE:-rancher/k3s:v1.35.8-k3s1}
+    hostname: ckad-control
+    privileged: true
+    command: ["server", "--node-name=ckad-control", "--tls-san=cluster", "--egress-selector-mode=disabled"]
+    environment:
+      # This is a public, lab-only join token, not a production credential.
+      K3S_TOKEN: ckad-flightdeck-disposable-local-lab-only
+      K3S_KUBECONFIG_OUTPUT: /output/k3s.yaml
+      K3S_KUBECONFIG_MODE: "644"
+    tmpfs:
+      - /run
+      - /var/run
+    volumes:
+      - control-state:/var/lib/rancher/k3s
+      - control-identity:/etc/rancher/node
+      - kubeconfig:/output
+    networks: [lab]
+    restart: unless-stopped
+    stop_grace_period: 30s
+  worker:
+    image: ${K3S_IMAGE:-rancher/k3s:v1.35.8-k3s1}
+    hostname: ckad-worker
+    privileged: true
+    command: ["agent", "--node-name=ckad-worker"]
+    environment:
+      K3S_URL: https://cluster:6443
+      K3S_TOKEN: ckad-flightdeck-disposable-local-lab-only
+    tmpfs:
+      - /run
+      - /var/run
+    volumes:
+      - worker-state:/var/lib/rancher/k3s
+      - worker-identity:/etc/rancher/node
+    networks: [lab]
+    depends_on: [cluster]
+    restart: unless-stopped
+    stop_grace_period: 30s
+  builder:
+    image: docker:28.5.2-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    # Dedicated, disposable Docker daemon. Never mount the host Docker socket.
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock", "--tls=false"]
+    volumes:
+      - builder-state:/var/lib/docker
+    networks: [build]
+    restart: unless-stopped
+  app:
+    build:
+      context: .
+      args:
+        KUBECTL_VERSION: ${KUBECTL_VERSION:-v1.35.8}
+        HELM_VERSION: v3.19.0
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DOCKER_HOST: tcp://builder:2375
+      DOCKER_BUILDKIT: "1"
+      WORKSPACE: /workspace
+      DATA_DIR: /data
+      K3S_CONFIG: /kube/k3s.yaml
+      GRADER_KUBECONFIG: /run/lab-kubeconfig
+    ports:
+      - "127.0.0.1:${FLIGHTDECK_PORT:-8080}:8080"
+    volumes:
+      - workspace:/workspace
+      - app-state:/data
+      - kubeconfig:/kube:ro
+    networks: [lab, build]
+    depends_on: [cluster, worker, builder]
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+networks:
+  lab: {}
+  build: {}
+volumes:
+  control-state: {}
+  control-identity: {}
+  worker-state: {}
+  worker-identity: {}
+  kubeconfig: {}
+  builder-state: {}
+  workspace: {}
+  app-state: {}
